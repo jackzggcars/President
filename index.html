@@ -613,7 +613,7 @@ body.locked{overflow:hidden}
     <button class="btn btn-primary btn-sm" data-act="fresh">Start your campaign</button>
   </div>
 </header>
-<div class="ai-banner" id="ai-banner" hidden><div class="wrap"><span>Live AI is off, so reactions come from the built-in rulebook. Add your own Claude or OpenRouter key to turn on live AI writing.</span><button class="btn btn-primary btn-xs" data-act="aiSettings">Add an AI key</button></div></div>
+<div class="ai-banner" id="ai-banner" hidden><div class="wrap"><span>Live AI is off, so reactions come from the built-in rulebook. Add your own Claude, Gemini or OpenRouter key to turn on live AI writing.</span><button class="btn btn-primary btn-xs" data-act="aiSettings">Add an AI key</button></div></div>
 
 <main id="top">
   <section class="hero">
@@ -976,13 +976,26 @@ const AIK='ps-ai-settings';
 const ON_CLAUDE=!!(window.claude&&typeof window.claude.use==='function');
 const PROVIDERS={
 anthropic:{t:'Anthropic (Claude)',base:'https://api.anthropic.com',quick:'claude-haiku-4-5',main:'claude-sonnet-5-5',hint:'Starts with sk-ant-',link:'https://console.anthropic.com/settings/keys'},
+gemini:{t:'Google Gemini',base:'https://generativelanguage.googleapis.com/v1beta',quick:'gemini-3.5-flash',main:'gemini-3.5-flash',hint:'Starts with AIza',link:'https://aistudio.google.com/apikey'},
 openrouter:{t:'OpenRouter (many models, one key)',base:'https://openrouter.ai/api/v1',quick:'',main:'',hint:'Starts with sk-or-',link:'https://openrouter.ai/keys'},
 custom:{t:'Custom OpenAI-compatible endpoint',base:'',quick:'',main:'',hint:'Your endpoint\u2019s API key',link:''}};
 function aiCfg(){try{const s=localStorage.getItem(AIK)||sessionStorage.getItem(AIK);const c=s?JSON.parse(s):null;return c&&c.key?c:null;}catch(e){return null;}}
 function storeAiCfg(c,remember){try{localStorage.removeItem(AIK);sessionStorage.removeItem(AIK);if(c)(remember?localStorage:sessionStorage).setItem(AIK,JSON.stringify(c));}catch(e){}}
 function parseJSONText(t){if(!t) return null;const s=String(t).replace(/```json|```/g,'').trim();const i=s.indexOf('{'),j=s.lastIndexOf('}');if(i<0||j<i) return null;try{return JSON.parse(s.slice(i,j+1));}catch(e){return null;}}
 let lastAIError='';
-async function directChat(cfg,messages,tier){const model=(tier==='quick'?cfg.quick:cfg.main)||cfg.main||cfg.quick;if(!model) throw new Error('No model name set');
+function detectProvider(key){key=String(key||'').trim();if(/^AIza/.test(key)) return 'gemini';if(/^sk-ant-/.test(key)) return 'anthropic';if(/^sk-or-/.test(key)) return 'openrouter';return null;}
+async function geminiModels(key){const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200',{headers:{'x-goog-api-key':key}});const d=await r.json().catch(()=>({}));if(!r.ok) throw new Error((d.error&&d.error.message)||`HTTP ${r.status}`);
+  return (d.models||[]).filter(m=>(m.supportedGenerationMethods||[]).includes('generateContent')).map(m=>String(m.name||'').replace(/^models\//,'')).filter(n=>/^gemini-/.test(n)&&!/(image|tts|audio|embed|live|vision|exp|preview)/.test(n));}
+function pickGemini(list){const ver=n=>{const m=n.match(/gemini-(\d+(?:\.\d+)?)/);return m?parseFloat(m[1]):0;};const by=a=>[...a].sort((x,y)=>ver(y)-ver(x)||x.length-y.length);
+  const flash=by(list.filter(n=>/flash/.test(n)&&!/lite/.test(n))),lite=by(list.filter(n=>/flash-lite/.test(n))),pro=by(list.filter(n=>/pro/.test(n)));
+  const main=flash[0]||pro[0]||list[0]||'';return {quick:lite[0]||main,main};}
+async function directChat(cfg,messages,tier,json){const model=(tier==='quick'?cfg.quick:cfg.main)||cfg.main||cfg.quick;if(!model) throw new Error('No model name set');
+  if(cfg.provider==='gemini'){
+    const body={contents:messages.map(m=>({role:m.role==='assistant'?'model':'user',parts:[{text:String(m.content)}]})),generationConfig:{maxOutputTokens:8192,...(json?{responseMimeType:'application/json'}:{})}};
+    const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{method:'POST',headers:{'content-type':'application/json','x-goog-api-key':cfg.key},body:JSON.stringify(body)});
+    const d=await r.json().catch(()=>({}));if(!r.ok) throw new Error((d.error&&d.error.message)||`HTTP ${r.status}`);
+    const c=(d.candidates||[])[0];if(!c){throw new Error(d.promptFeedback&&d.promptFeedback.blockReason?`Gemini blocked the request (${d.promptFeedback.blockReason})`:'Gemini returned no answer');}
+    return ((c.content&&c.content.parts)||[]).filter(x=>x.text&&!x.thought).map(x=>x.text).join('');}
   if(cfg.provider==='anthropic'){
     const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'content-type':'application/json','x-api-key':cfg.key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model,max_tokens:4000,messages})});
     const d=await r.json().catch(()=>({}));if(!r.ok) throw new Error((d.error&&d.error.message)||`HTTP ${r.status}`);
@@ -1001,19 +1014,23 @@ function showAISettings(){const c=aiCfg()||{provider:'anthropic',quick:PROVIDERS
   <div class="field" id="ai-base-f" ${c.provider==='custom'?'':'hidden'}><label class="fl" for="ai-base">Endpoint URL</label><input id="ai-base" type="text" value="${esc(c.base||'')}" placeholder="https://your-proxy.example.com/v1"><p class="hint" style="margin-top:6px">Must accept browser requests and speak the OpenAI chat completions format.</p></div>
   <div class="field"><label class="fl" for="ai-key">API key</label><input id="ai-key" type="password" autocomplete="off" spellcheck="false" value="${esc(c.key||'')}" placeholder="${esc(pv.hint)}"><p class="hint" style="margin-top:6px" id="ai-keylink">${pv.link?`Get one at <a href="${pv.link}" target="_blank" rel="noopener">${pv.link.replace('https://','')}</a>.`:''}</p></div>
   <div class="row2"><div class="field"><label class="fl" for="ai-quick">Fast model</label><input id="ai-quick" type="text" value="${esc(c.quick||'')}" placeholder="Model for quick reactions"></div><div class="field"><label class="fl" for="ai-main">Main model</label><input id="ai-main" type="text" value="${esc(c.main||'')}" placeholder="Model for bigger writing"></div></div>
-  <p class="hint" id="ai-modelhint" style="margin-top:-8px">${c.provider==='anthropic'?'Defaults are Claude Haiku 4.5 for speed and Claude Sonnet 5.5 for longer writing. Any model name from the Claude docs works.':'Use exact model names from your provider\u2019s model list.'}</p>
+  <p class="hint" id="ai-modelhint" style="margin-top:-8px">${c.provider==='gemini'?'If these models aren\u2019t available to your key, Test connection picks ones that are.':c.provider==='anthropic'?'Defaults are Claude Haiku 4.5 for speed and Claude Sonnet 5.5 for longer writing. Any model name from the Claude docs works.':'Use exact model names from your provider\u2019s model list.'}</p>
   <label class="check-row"><input type="checkbox" id="ai-remember" ${c.remember!==false?'checked':''}> Remember my key on this device</label>
   <div class="memo" style="margin-top:14px;font-size:14px"><b>How your key is used.</b> It is stored only in this browser and sent straight from your browser to the provider you chose. Nothing passes through any other server. Usage is billed to your account. Don't use this on a shared computer, and never paste your key into the website's code before you publish it.</div>
   <div id="ai-test" style="margin-top:12px"></div>`,
   `<button class="btn btn-ghost btn-sm" data-act="aiTest">Test connection</button>${aiCfg()?`<button class="btn btn-ghost btn-sm" data-act="aiClear" style="color:var(--rival)">Remove key</button>`:''}<button class="btn btn-primary btn-sm" data-act="aiSave" style="margin-left:auto">Save</button>`));}
-function readAiForm(){return {provider:($('#ai-prov')||{}).value||'anthropic',base:(($('#ai-base')||{}).value||'').trim(),key:(($('#ai-key')||{}).value||'').trim(),quick:(($('#ai-quick')||{}).value||'').trim(),main:(($('#ai-main')||{}).value||'').trim(),remember:!!($('#ai-remember')&&$('#ai-remember').checked)};}
-async function aiTest(){const c=readAiForm();const box=$('#ai-test');if(!c.key){box.innerHTML='<p class="err">Enter a key first.</p>';return;}box.innerHTML='<p class="counter">Testing…</p>';
-  try{const t=await directChat(c,[{role:'user',content:'Reply with only this JSON and nothing else: {"ok":true,"note":"ready"}'}],'quick');const j=parseJSONText(t);box.innerHTML=j?'<div class="alert" style="margin:0;background:var(--good-soft)"><span aria-hidden="true">✅</span><div><b>Connected.</b> The model answered. Save to turn live AI on.</div></div>':`<p class="err">Connected, but the reply wasn't valid JSON. Try a more capable model.</p>`;}
-  catch(e){box.innerHTML=`<p class="err">Couldn't connect: ${esc(String(e.message||e))}${ON_CLAUDE?' (claude.ai pages block outside connections, so test this on your own site.)':''}</p>`;}}
-function aiSave(){const c=readAiForm();if(!c.key){$('#ai-test').innerHTML='<p class="err">Enter a key, or use Remove key to turn it off.</p>';return;}if(c.provider==='custom'&&!c.base){$('#ai-test').innerHTML='<p class="err">Enter your endpoint URL.</p>';return;}if(!c.quick&&!c.main){$('#ai-test').innerHTML='<p class="err">Enter at least one model name.</p>';return;}
-  storeAiCfg(c,c.remember);closeModal();refreshAiUi();toast('🔑 Live AI is on');}
+function readAiForm(){const key0=(($('#ai-key')||{}).value||'').trim();const det=detectProvider(key0);const sel=($('#ai-prov')||{}).value||'anthropic';if(det&&det!==sel&&sel!=='custom'){$('#ai-prov').value=det;aiProvChange();aiNote=`That looks like a ${PROVIDERS[det].t} key, so I switched the provider to ${PROVIDERS[det].t}.`;}
+  return {provider:($('#ai-prov')||{}).value||'anthropic',base:(($('#ai-base')||{}).value||'').trim(),key:(($('#ai-key')||{}).value||'').trim(),quick:(($('#ai-quick')||{}).value||'').trim(),main:(($('#ai-main')||{}).value||'').trim(),remember:!!($('#ai-remember')&&$('#ai-remember').checked)};}
+let aiNote='';
+async function fixGeminiModels(c){if(c.provider!=='gemini') return '';const list=await geminiModels(c.key);if(!list.length) throw new Error('Your key works, but no Gemini text models are available to it');const ok=m=>m&&list.includes(m);let note='';if(!ok(c.quick)||!ok(c.main)){const pk=pickGemini(list);if(!ok(c.main)) c.main=pk.main;if(!ok(c.quick)) c.quick=pk.quick;$('#ai-quick').value=c.quick;$('#ai-main').value=c.main;note=` Picked models your key can use: ${c.quick} and ${c.main}.`;}return note;}
+async function aiTest(){aiNote='';const c=readAiForm();const box=$('#ai-test');if(!c.key){box.innerHTML='<p class="err">Enter a key first.</p>';return;}box.innerHTML='<p class="counter">Testing…</p>';
+  try{const gn=await fixGeminiModels(c);const t=await directChat(c,[{role:'user',content:'Reply with only this JSON and nothing else: {"ok":true,"note":"ready"}'}],'quick',true);const j=parseJSONText(t);box.innerHTML=j?`<div class="alert" style="margin:0;background:var(--good-soft)"><span aria-hidden="true">✅</span><div><b>Connected.</b> The model answered.${esc(aiNote?' '+aiNote:'')}${esc(gn)} Save to turn live AI on.</div></div>`:`<p class="err">Connected, but the reply wasn't valid JSON. Try a more capable model.</p>`;}
+  catch(e){box.innerHTML=`<p class="err">${aiNote?esc(aiNote)+' ':''}Couldn't connect: ${esc(String(e.message||e))}${ON_CLAUDE?' (claude.ai pages block outside connections, so test this on your own site.)':''}</p>`;}}
+async function aiSave(){aiNote='';const c=readAiForm();if(!c.key){$('#ai-test').innerHTML='<p class="err">Enter a key, or use Remove key to turn it off.</p>';return;}if(c.provider==='custom'&&!c.base){$('#ai-test').innerHTML='<p class="err">Enter your endpoint URL.</p>';return;}if(!c.quick&&!c.main){$('#ai-test').innerHTML='<p class="err">Enter at least one model name.</p>';return;}
+  if(c.provider==='gemini'){try{await fixGeminiModels(c);}catch(e){$('#ai-test').innerHTML=`<p class="err">Couldn't reach Gemini with that key: ${esc(String(e.message||e))}</p>`;return;}}
+  storeAiCfg(c,c.remember);closeModal();refreshAiUi();toast(aiNote?'🔑 Live AI is on. '+aiNote:'🔑 Live AI is on');}
 function aiClear(){storeAiCfg(null);closeModal();refreshAiUi();toast('AI key removed. Using the built-in rulebook.');}
-function aiProvChange(){const k=($('#ai-prov')||{}).value;const p=PROVIDERS[k];if(!p) return;const bf=$('#ai-base-f');if(bf) bf.hidden=k!=='custom';$('#ai-quick').value=p.quick;$('#ai-main').value=p.main;$('#ai-key').placeholder=p.hint;$('#ai-keylink').innerHTML=p.link?`Get one at <a href="${p.link}" target="_blank" rel="noopener">${p.link.replace('https://','')}</a>.`:'';$('#ai-modelhint').textContent=k==='anthropic'?'Defaults are Claude Haiku 4.5 for speed and Claude Sonnet 5.5 for longer writing.':'Use exact model names from your provider\u2019s model list.';}
+function aiProvChange(){const k=($('#ai-prov')||{}).value;const p=PROVIDERS[k];if(!p) return;const bf=$('#ai-base-f');if(bf) bf.hidden=k!=='custom';$('#ai-quick').value=p.quick;$('#ai-main').value=p.main;$('#ai-key').placeholder=p.hint;$('#ai-keylink').innerHTML=p.link?`Get one at <a href="${p.link}" target="_blank" rel="noopener">${p.link.replace('https://','')}</a>.`:'';$('#ai-modelhint').textContent=k==='anthropic'?'Defaults are Claude Haiku 4.5 for speed and Claude Sonnet 5.5 for longer writing.':k==='gemini'?'If these models aren\u2019t available to your key, Test connection picks ones that are.':'Use exact model names from your provider\u2019s model list.';}
 
 const RULES=`You are the simulation engine of President Simulator, a realistic, slightly playful US presidential general-election game set in a fictional 2028 race.
 Rules: Party names (Democratic, Republican, Libertarian, Green, Independent) are real, but every person you invent is fictional. Never name or impersonate real living politicians, candidates, journalists or media outlets. Judge the player's words on political realism: how real American voters like each persona would react, given the candidate's party and today's coalitions. Reward specificity, empathy, competence and humor that lands; penalize vagueness, cruelty, gaffes, contradicting the candidate's own platform or party base, and positions far outside a persona's values. Be even-handed across parties: a well-made Republican answer and a well-made Democratic answer should each win their natural voters. Keep language clean.
@@ -1023,11 +1040,11 @@ async function askAI(prompt,fallback,tier='quick'){
   if(s&&!aiDenied){try{const out=await s.json(prompt,{modelTier:tier,cache:false});if(!out||typeof out!=='object') throw {code:'bad'};lastAI=true;return out;}
     catch(e){if(e&&(e.code==='not_granted')) aiDenied=true;lastAI=false;return fallback();}}
   const cfg=aiCfg();
-  if(cfg){try{const txt=await directChat(cfg,[{role:'user',content:prompt}],tier);const out=parseJSONText(txt);if(!out) throw new Error('The model did not return valid JSON');lastAI=true;lastAIError='';return out;}
+  if(cfg){try{const txt=await directChat(cfg,[{role:'user',content:prompt}],tier,true);const out=parseJSONText(txt);if(!out) throw new Error('The model did not return valid JSON');lastAI=true;lastAIError='';return out;}
     catch(e){lastAIError=String(e&&e.message||e);console.warn('AI request failed:',lastAIError);}}
   lastAI=false;return fallback();
 }
-const aiBadge=on=>on?`<span class="badge-ai">✨ Written live by ${ON_CLAUDE||(aiCfg()&&aiCfg().provider==='anthropic')?'Claude':'AI'}</span>`:`<span class="badge-ai off" ${lastAIError?`title="${esc(lastAIError)}"`:''}>Built-in rulebook${!ON_CLAUDE&&!aiCfg()?' (add an AI key for live writing)':lastAIError?' (AI error)':''}</span>`;
+const aiBadge=on=>on?`<span class="badge-ai">✨ Written live by ${ON_CLAUDE||(aiCfg()&&aiCfg().provider==='anthropic')?'Claude':aiCfg()&&aiCfg().provider==='gemini'?'Gemini':'AI'}</span>`:`<span class="badge-ai off" ${lastAIError?`title="${esc(lastAIError)}"`:''}>Built-in rulebook${!ON_CLAUDE&&!aiCfg()?' (add an AI key for live writing)':lastAIError?' (AI error)':''}</span>`;
 function personaList(ids=IDS,withMood=false){return ids.map(id=>{const p=P[id];return `- ${p.id}: ${p.name}, ${p.age}, ${p.place}. ${p.bio}${withMood&&G&&G.mood?` Current feeling toward the candidate: ${fmt(G.mood[id])} (scale -10..10); stay consistent unless this truly changes their mind.`:''}`}).join('\n');}
 function normPersonas(arr,ids,fb){
   const by={};(Array.isArray(arr)?arr:[]).forEach(r=>{if(r&&P[r.id]) by[r.id]=r;});
